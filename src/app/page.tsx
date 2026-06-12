@@ -1,13 +1,14 @@
 import { CalendarDays, MapPin, Radio, Trophy, Users } from "lucide-react";
 
-import { getWorldCupSnapshot } from "@infrastructure/worldcup2026";
 import { Container, PageHeader, SectionTitle } from "@shared/components";
 import { cn } from "@shared/lib/utils";
+
+import { getUpcomingTimeline } from "./internal-world-cup-api";
 
 export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
-  const snapshot = await getWorldCupSnapshot();
+  const snapshot = await getUpcomingTimeline();
   const liveMatches = snapshot.matches.filter(
     (match) => match.status === "live",
   );
@@ -129,8 +130,8 @@ export default async function HomePage() {
   );
 }
 
-type Match = Awaited<ReturnType<typeof getWorldCupSnapshot>>["matches"][number];
-type Team = Awaited<ReturnType<typeof getWorldCupSnapshot>>["teams"][number];
+type Match = Awaited<ReturnType<typeof getUpcomingTimeline>>["matches"][number];
+type Team = Awaited<ReturnType<typeof getUpcomingTimeline>>["teams"][number];
 
 type MetricProps = {
   icon: typeof CalendarDays;
