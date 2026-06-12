@@ -1,3 +1,24 @@
+import { mapValidDtos } from "./adapters";
+import { WorldCupApiClient } from "./api-client";
+import type {
+  WorldCupMatchesDtoResponse,
+  WorldCupMatchDto,
+  WorldCupStadiumsDtoResponse,
+  WorldCupStadiumDto,
+  WorldCupTeamsDtoResponse,
+  WorldCupTeamDto,
+} from "./contracts";
+import {
+  mapMatchDtoToDomain,
+  mapStadiumDtoToDomain,
+  mapTeamDtoToDomain,
+} from "./mappers";
+import type {
+  WorldCupDomainSnapshotResponse,
+  WorldCupMatchesResponse,
+  WorldCupStadiumsResponse,
+  WorldCupTeamsResponse,
+} from "./responses";
 import type {
   WorldCupMatch,
   WorldCupMatchStatus,
@@ -5,70 +26,32 @@ import type {
   WorldCupStadium,
   WorldCupTeam,
 } from "./types";
+import { withRepositoryFallback } from "./errors";
+import {
+  normalizeCountry,
+  normalizePositiveInteger,
+  normalizeScore,
+  normalizeTeamName,
+  normalizeText,
+  normalizeUtcDate,
+} from "./normalizers";
+import {
+  readMatchesResponse,
+  readStadiumsResponse,
+  readTeamsResponse,
+} from "./validators";
 
-const API_BASE_URL =
-  process.env.WORLDCUP2026_API_BASE_URL ?? "https://worldcup26.ir";
-
-const REVALIDATE_SECONDS = 60;
-
-type ApiTeam = {
-  id: string;
-  name_en: string;
-  fifa_code: string;
-  groups: string;
-  flag: string;
-};
-
-type ApiStadium = {
-  id: string;
-  name_en: string;
-  fifa_name: string;
-  city_en: string;
-  country_en: string;
-  capacity: number;
-  region: string;
-};
-
-type ApiGame = {
-  id: string;
-  home_team_id: string;
-  away_team_id: string;
-  home_score: string;
-  away_score: string;
-  group: string;
-  matchday: string;
-  local_date: string;
-  stadium_id: string;
-  finished: string;
-  time_elapsed: string;
-  type: string;
-  home_team_name_en?: string;
-  away_team_name_en?: string;
-  home_team_label?: string;
-  away_team_label?: string;
-};
-
-type TeamsResponse = {
-  teams: ApiTeam[];
-};
-
-type StadiumsResponse = {
-  stadiums: ApiStadium[];
-};
-
-type GamesResponse = {
-  games: ApiGame[];
-};
+const apiClient = new WorldCupApiClient();
 
 export async function getWorldCupSnapshot(): Promise<WorldCupSnapshot> {
   const [teamsResponse, stadiumsResponse, gamesResponse] = await Promise.all([
-    fetchApi<TeamsResponse>("/get/teams"),
-    fetchApi<StadiumsResponse>("/get/stadiums"),
-    fetchApi<GamesResponse>("/get/games"),
+    fetchTeams(),
+    fetchStadiums(),
+    fetchMatches(),
   ]);
 
-  const teams = teamsResponse.teams.map(mapTeam);
-  const stadiums = stadiumsResponse.stadiums.map(mapStadium);
+  const teams = mapValidDtos(teamsResponse.teams, mapTeam);
+  const stadiums = mapValidDtos(stadiumsResponse.stadiums, mapStadium);
   const stadiumsById = new Map(
     stadiums.map((stadium) => [stadium.id, stadium]),
   );
@@ -79,63 +62,131 @@ export async function getWorldCupSnapshot(): Promise<WorldCupSnapshot> {
     ),
     stadiums: stadiums.sort((a, b) => a.name.localeCompare(b.name)),
     matches: gamesResponse.games
-      .map((game) => mapMatch(game, stadiumsById))
+      .flatMap((game) =>
+        mapValidDtos([game], (dto) => mapMatch(dto, stadiumsById)),
+      )
       .sort((a, b) => a.startsAt.getTime() - b.startsAt.getTime()),
     updatedAt: new Date(),
   };
 }
 
-async function fetchApi<TResponse>(path: string): Promise<TResponse> {
-  const headers: HeadersInit = {
-    Accept: "application/json",
-  };
+export async function getWorldCupTeams(): Promise<WorldCupTeamsResponse> {
+  const response = await fetchTeams();
 
-  if (process.env.WORLDCUP2026_API_TOKEN) {
-    headers.Authorization = `Bearer ${process.env.WORLDCUP2026_API_TOKEN}`;
-  }
-
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    headers,
-    next: { revalidate: REVALIDATE_SECONDS },
-  });
-
-  if (!response.ok) {
-    throw new Error(
-      `World Cup 2026 API request failed: ${response.status} ${response.statusText}`,
-    );
-  }
-
-  return response.json() as Promise<TResponse>;
+  return mapValidDtos(response.teams, mapTeamDtoToDomain).sort((a, b) =>
+    a.name.localeCompare(b.name),
+  );
 }
 
-function mapTeam(team: ApiTeam): WorldCupTeam {
+export async function getWorldCupStadiums(): Promise<WorldCupStadiumsResponse> {
+  const response = await fetchStadiums();
+
+  return mapValidDtos(response.stadiums, mapStadiumDtoToDomain).sort((a, b) =>
+    a.name.localeCompare(b.name),
+  );
+}
+
+export async function getWorldCupMatches(): Promise<WorldCupMatchesResponse> {
+  const [teamsResponse, stadiumsResponse, matchesResponse] = await Promise.all([
+    fetchTeams(),
+    fetchStadiums(),
+    fetchMatches(),
+  ]);
+
+  const teams = mapValidDtos(teamsResponse.teams, mapTeamDtoToDomain);
+  const stadiums = mapValidDtos(
+    stadiumsResponse.stadiums,
+    mapStadiumDtoToDomain,
+  );
+  const teamsById = new Map(teams.map((team) => [team.id, team]));
+  const stadiumsById = new Map(
+    stadiums.map((stadium) => [stadium.id, stadium]),
+  );
+
+  return mapValidDtos(matchesResponse.games, (match) =>
+    mapMatchDtoToDomain(match, { teamsById, stadiumsById }),
+  ).sort((a, b) => a.startsAt.getTime() - b.startsAt.getTime());
+}
+
+export async function getWorldCupDomainSnapshot(): Promise<WorldCupDomainSnapshotResponse> {
+  const [teamsResponse, stadiumsResponse, matchesResponse] = await Promise.all([
+    fetchTeams(),
+    fetchStadiums(),
+    fetchMatches(),
+  ]);
+
+  const teams = mapValidDtos(teamsResponse.teams, mapTeamDtoToDomain).sort(
+    (a, b) => a.name.localeCompare(b.name),
+  );
+  const stadiums = mapValidDtos(
+    stadiumsResponse.stadiums,
+    mapStadiumDtoToDomain,
+  ).sort((a, b) => a.name.localeCompare(b.name));
+  const teamsById = new Map(teams.map((team) => [team.id, team]));
+  const stadiumsById = new Map(
+    stadiums.map((stadium) => [stadium.id, stadium]),
+  );
+
   return {
-    id: team.id,
-    name: team.name_en,
-    fifaCode: team.fifa_code,
-    group: team.groups,
-    flagUrl: team.flag,
+    teams,
+    stadiums,
+    matches: mapValidDtos(matchesResponse.games, (match) =>
+      mapMatchDtoToDomain(match, { teamsById, stadiumsById }),
+    ).sort((a, b) => a.startsAt.getTime() - b.startsAt.getTime()),
+    updatedAt: new Date(),
   };
 }
 
-function mapStadium(stadium: ApiStadium): WorldCupStadium {
+function fetchTeams(): Promise<WorldCupTeamsDtoResponse> {
+  return withRepositoryFallback(
+    async () => readTeamsResponse(await apiClient.get<unknown>("/get/teams")),
+    { teams: [] },
+  );
+}
+
+function fetchStadiums(): Promise<WorldCupStadiumsDtoResponse> {
+  return withRepositoryFallback(
+    async () =>
+      readStadiumsResponse(await apiClient.get<unknown>("/get/stadiums")),
+    { stadiums: [] },
+  );
+}
+
+function fetchMatches(): Promise<WorldCupMatchesDtoResponse> {
+  return withRepositoryFallback(
+    async () => readMatchesResponse(await apiClient.get<unknown>("/get/games")),
+    { games: [] },
+  );
+}
+
+function mapTeam(team: WorldCupTeamDto): WorldCupTeam {
   return {
-    id: stadium.id,
-    name: stadium.name_en,
-    fifaName: stadium.fifa_name,
-    city: stadium.city_en,
-    country: stadium.country_en,
-    capacity: stadium.capacity,
-    region: stadium.region,
+    id: normalizeText(team.id),
+    name: normalizeText(team.name_en),
+    fifaCode: normalizeText(team.fifa_code, "TBD"),
+    group: normalizeText(team.groups, "TBD"),
+    flagUrl: normalizeText(team.flag, ""),
+  };
+}
+
+function mapStadium(stadium: WorldCupStadiumDto): WorldCupStadium {
+  return {
+    id: normalizeText(stadium.id),
+    name: normalizeText(stadium.name_en),
+    fifaName: normalizeText(stadium.fifa_name, normalizeText(stadium.name_en)),
+    city: normalizeText(stadium.city_en),
+    country: normalizeCountry(stadium.country_en),
+    capacity: normalizePositiveInteger(stadium.capacity) ?? 1,
+    region: normalizeText(stadium.region, "TBD"),
   };
 }
 
 function mapMatch(
-  game: ApiGame,
+  game: WorldCupMatchDto,
   stadiumsById: Map<string, WorldCupStadium>,
 ): WorldCupMatch {
   return {
-    id: game.id,
+    id: normalizeText(game.id),
     homeTeam: resolveTeamName(
       game.home_team_id,
       game.home_team_name_en,
@@ -146,14 +197,14 @@ function mapMatch(
       game.away_team_name_en,
       game.away_team_label,
     ),
-    homeScore: parseInteger(game.home_score),
-    awayScore: parseInteger(game.away_score),
-    group: game.group,
-    matchday: parseInteger(game.matchday),
-    startsAt: parseLocalDate(game.local_date),
+    homeScore: normalizeScore(game.home_score),
+    awayScore: normalizeScore(game.away_score),
+    group: normalizeText(game.group, "TBD"),
+    matchday: normalizeScore(game.matchday),
+    startsAt: normalizeUtcDate(game.local_date),
     stadium: stadiumsById.get(game.stadium_id),
     status: parseStatus(game),
-    stage: game.type,
+    stage: normalizeText(game.type, "group"),
   };
 }
 
@@ -162,14 +213,10 @@ function resolveTeamName(
   teamName: string | undefined,
   teamLabel: string | undefined,
 ): string {
-  if (teamId !== "0" && teamName) {
-    return teamName;
-  }
-
-  return teamLabel ?? "TBD";
+  return normalizeTeamName(teamId, teamName, teamLabel);
 }
 
-function parseStatus(game: ApiGame): WorldCupMatchStatus {
+function parseStatus(game: WorldCupMatchDto): WorldCupMatchStatus {
   if (game.finished === "TRUE" || game.time_elapsed === "finished") {
     return "finished";
   }
@@ -179,17 +226,4 @@ function parseStatus(game: ApiGame): WorldCupMatchStatus {
   }
 
   return "scheduled";
-}
-
-function parseInteger(value: string): number {
-  const parsed = Number.parseInt(value, 10);
-  return Number.isNaN(parsed) ? 0 : parsed;
-}
-
-function parseLocalDate(value: string): Date {
-  const [datePart, timePart] = value.split(" ");
-  const [month, day, year] = datePart.split("/").map(Number);
-  const [hours, minutes] = timePart.split(":").map(Number);
-
-  return new Date(year, month - 1, day, hours, minutes);
 }
